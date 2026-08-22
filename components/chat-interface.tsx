@@ -1,28 +1,22 @@
 'use client';
 
-import { useChat } from '@ai-sdk/react';
 import { useEffect, useRef, useState } from 'react';
 import { Send, Settings, RotateCcw, Copy, Check } from 'lucide-react';
 import { useChatStore } from '@/lib/store';
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 export function ChatInterface() {
   const { settings, updateSettings, resetSettings } = useChatStore();
   const [showSettings, setShowSettings] = useState(false);
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  const { messages, input, setInput, sendMessage, status } = useChat({
-    api: '/api/chat',
-    body: {
-      model: settings.model,
-      temperature: settings.temperature,
-      topP: settings.topP,
-      maxTokens: settings.maxTokens,
-      systemPrompt: settings.systemPrompt,
-    },
-  });
-
-  const isLoading = status === 'streaming' || status === 'submitted';
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -66,45 +60,38 @@ export function ChatInterface() {
               </div>
             </div>
           ) : (
-            messages.map((message, i) => {
-              const content = message.parts
-                ?.filter((part) => part.type === 'text')
-                .map((part) => (part as any).text)
-                .join('') || '';
-
-              return (
+            messages.map((message, i) => (
+              <div
+                key={i}
+                className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
                 <div
-                  key={i}
-                  className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  className={`max-w-2xl rounded-lg px-4 py-3 ${
+                    message.role === 'user'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-card border border-border'
+                  }`}
                 >
-                  <div
-                    className={`max-w-2xl rounded-lg px-4 py-3 ${
-                      message.role === 'user'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-card border border-border'
-                    }`}
-                  >
-                    <p className="whitespace-pre-wrap text-sm">{content}</p>
-                    {message.role === 'assistant' && (
-                      <button
-                        onClick={() => handleCopy(content, i)}
-                        className="mt-2 text-xs opacity-70 hover:opacity-100 transition-opacity"
-                      >
-                        {copiedId === i ? (
-                          <span className="flex items-center gap-1">
-                            <Check size={14} /> Copied
-                          </span>
-                        ) : (
-                          <span className="flex items-center gap-1">
-                            <Copy size={14} /> Copy
-                          </span>
-                        )}
-                      </button>
-                    )}
-                  </div>
+                  <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+                  {message.role === 'assistant' && (
+                    <button
+                      onClick={() => handleCopy(message.content, i)}
+                      className="mt-2 text-xs opacity-70 hover:opacity-100 transition-opacity"
+                    >
+                      {copiedId === i ? (
+                        <span className="flex items-center gap-1">
+                          <Check size={14} /> Copied
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1">
+                          <Copy size={14} /> Copy
+                        </span>
+                      )}
+                    </button>
+                  )}
                 </div>
-              );
-            })
+              </div>
+            ))
           )}
           {isLoading && messages[messages.length - 1]?.role === 'user' && (
             <div className="flex justify-start">
@@ -129,11 +116,65 @@ export function ChatInterface() {
         {/* Input */}
         <div className="border-t border-border bg-card px-6 py-4">
           <form
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault();
-              if (input.trim()) {
-                sendMessage({ text: input });
-                setInput('');
+              if (!input.trim() || isLoading) return;
+
+              const userMessage = input;
+              setInput('');
+              setMessages((prev) => [...prev, { role: 'user', content: userMessage }]);
+              setIsLoading(true);
+
+              try {
+                const response = await fetch('/api/chat', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    messages: [
+                      ...messages,
+                      { role: 'user', content: userMessage },
+                    ],
+                    model: settings.model,
+                    temperature: settings.temperature,
+                    topP: settings.topP,
+                    maxTokens: settings.maxTokens,
+                  }),
+                });
+
+                if (!response.ok) {
+                  const error = await response.json();
+                  throw new Error(error.error || 'Failed to get response');
+                }
+
+                const reader = response.body?.getReader();
+                if (!reader) throw new Error('No response body');
+
+                let assistantMessage = '';
+                setMessages((prev) => [...prev, { role: 'assistant', content: assistantMessage }]);
+
+                const decoder = new TextDecoder();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+
+                  assistantMessage += decoder.decode(value, { stream: true });
+                  setMessages((prev) => {
+                    const updated = [...prev];
+                    updated[updated.length - 1] = {
+                      role: 'assistant',
+                      content: assistantMessage,
+                    };
+                    return updated;
+                  });
+                }
+              } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : 'An error occurred';
+                setMessages((prev) => [
+                  ...prev,
+                  { role: 'assistant', content: `Error: ${errorMessage}` },
+                ]);
+              } finally {
+                setIsLoading(false);
               }
             }}
             className="flex gap-3"

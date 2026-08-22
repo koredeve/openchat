@@ -1,10 +1,9 @@
-import { generateText, streamText } from 'ai';
-import { createOpenAI } from '@ai-sdk/openai';
+import OpenAI from 'openai';
 
-const openrouter = createOpenAI({
+const openrouter = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
   baseURL: 'https://openrouter.ai/api/v1',
-  headers: {
+  defaultHeaders: {
     'HTTP-Referer': process.env.VERCEL_URL
       ? `https://${process.env.VERCEL_URL}`
       : 'http://localhost:3000',
@@ -37,17 +36,43 @@ export async function POST(request: Request) {
       );
     }
 
-    const modelInstance = openrouter.chat(model);
-
-    const result = await streamText({
-      model: modelInstance,
-      messages,
+    const stream = await openrouter.chat.completions.create({
+      model,
+      messages: messages.map((msg: any) => ({
+        role: msg.role,
+        content: msg.content,
+      })),
       temperature: temperature ?? 0.7,
-      topP: topP ?? 1,
-      maxTokens: maxTokens ?? 2048,
+      top_p: topP ?? 1,
+      max_tokens: maxTokens ?? 2048,
+      stream: true,
     });
 
-    return result.toUIMessageStreamResponse();
+    // Convert to readable stream for response
+    const encoder = new TextEncoder();
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of stream) {
+            const delta = chunk.choices[0]?.delta?.content;
+            if (delta) {
+              controller.enqueue(encoder.encode(delta));
+            }
+          }
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(readable, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
+    });
   } catch (error) {
     console.error('Chat API error:', error);
     const message =
