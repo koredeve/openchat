@@ -1,16 +1,5 @@
 import OpenAI from 'openai';
 
-const openrouter = new OpenAI({
-  apiKey: process.env.OPENROUTER_API_KEY,
-  baseURL: 'https://openrouter.ai/api/v1',
-  defaultHeaders: {
-    'HTTP-Referer': process.env.VERCEL_URL
-      ? `https://${process.env.VERCEL_URL}`
-      : 'http://localhost:3000',
-    'X-Title': 'OpenChat',
-  },
-});
-
 export async function POST(request: Request) {
   try {
     const { messages, model, temperature, topP, maxTokens } = await request.json();
@@ -35,6 +24,17 @@ export async function POST(request: Request) {
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
+
+    const openrouter = new OpenAI({
+      apiKey: process.env.OPENROUTER_API_KEY,
+      baseURL: 'https://openrouter.ai/api/v1',
+      defaultHeaders: {
+        'HTTP-Referer': process.env.VERCEL_URL
+          ? `https://${process.env.VERCEL_URL}`
+          : 'http://localhost:3000',
+        'X-Title': 'OpenChat',
+      },
+    });
 
     const stream = await openrouter.chat.completions.create({
       model,
