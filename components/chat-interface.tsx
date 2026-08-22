@@ -51,16 +51,34 @@ export function ChatInterface() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  const processFiles = (files: File[]) => {
+    files.forEach((file) => {
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const base64 = event.target?.result as string;
+          setSelectedImages((prev) => [...prev, base64]);
+        };
+        reader.readAsDataURL(file);
+      }
+    });
+  };
+
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    files.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const base64 = event.target?.result as string;
-        setSelectedImages((prev) => [...prev, base64]);
-      };
-      reader.readAsDataURL(file);
-    });
+    processFiles(files);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const files = Array.from(e.dataTransfer.files);
+    processFiles(files);
   };
 
   const removeImage = (index: number) => {
@@ -93,6 +111,13 @@ export function ChatInterface() {
       content: userMessage || '[Image]',
       parts: parts.length > 0 ? parts : undefined,
     });
+
+    // Auto-generate title if this is the first message
+    if (currentConversation && currentConversation.messages.length === 0) {
+      const title =
+        userMessage.slice(0, 50).trim() || 'Image conversation';
+      renameConversation(currentConversation.id, title);
+    }
 
     setInput('');
     setSelectedImages([]);
@@ -270,7 +295,11 @@ export function ChatInterface() {
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        <div
+          className="flex-1 overflow-y-auto p-6 space-y-4"
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+        >
           {messages.length === 0 ? (
             <div className="flex items-center justify-center h-full text-center">
               <div className="space-y-2">
