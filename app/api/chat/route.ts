@@ -1,6 +1,13 @@
 import OpenAI from 'openai';
 
+// Simple token estimation (rough approximation)
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
 export async function POST(request: Request) {
+  const startTime = Date.now();
+
   try {
     const { messages, model, temperature, topP, maxTokens } = await request.json();
 
@@ -36,6 +43,10 @@ export async function POST(request: Request) {
       },
     });
 
+    // Calculate input tokens
+    const inputText = messages.map((m: any) => m.content).join(' ');
+    const inputTokens = estimateTokens(inputText);
+
     const stream = await openrouter.chat.completions.create({
       model,
       messages: messages.map((msg: any) => ({
@@ -50,15 +61,32 @@ export async function POST(request: Request) {
 
     // Convert to readable stream for response
     const encoder = new TextEncoder();
+    let outputText = '';
+
     const readable = new ReadableStream({
       async start(controller) {
         try {
           for await (const chunk of stream) {
             const delta = chunk.choices[0]?.delta?.content;
             if (delta) {
+              outputText += delta;
               controller.enqueue(encoder.encode(delta));
             }
           }
+
+          // Send metadata at the end
+          const outputTokens = estimateTokens(outputText);
+          const totalTokens = inputTokens + outputTokens;
+          const duration = (Date.now() - startTime) / 1000;
+
+          const metadata = `\n\n[METADATA]${JSON.stringify({
+            inputTokens,
+            outputTokens,
+            totalTokens,
+            duration: duration.toFixed(2),
+          })}[/METADATA]`;
+
+          controller.enqueue(encoder.encode(metadata));
           controller.close();
         } catch (error) {
           controller.error(error);

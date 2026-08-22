@@ -7,6 +7,8 @@ import { useChatStore } from '@/lib/store';
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+  tokens?: number;
+  duration?: number;
 }
 
 export function ChatInterface() {
@@ -74,20 +76,32 @@ export function ChatInterface() {
                 >
                   <p className="whitespace-pre-wrap text-sm">{message.content}</p>
                   {message.role === 'assistant' && (
-                    <button
-                      onClick={() => handleCopy(message.content, i)}
-                      className="mt-2 text-xs opacity-70 hover:opacity-100 transition-opacity"
-                    >
-                      {copiedId === i ? (
-                        <span className="flex items-center gap-1">
-                          <Check size={14} /> Copied
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1">
-                          <Copy size={14} /> Copy
-                        </span>
+                    <div className="mt-2 space-y-2">
+                      <button
+                        onClick={() => handleCopy(message.content, i)}
+                        className="text-xs opacity-70 hover:opacity-100 transition-opacity"
+                      >
+                        {copiedId === i ? (
+                          <span className="flex items-center gap-1">
+                            <Check size={14} /> Copied
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1">
+                            <Copy size={14} /> Copy
+                          </span>
+                        )}
+                      </button>
+                      {(message.tokens || message.duration) && (
+                        <div className="text-xs opacity-60 space-y-0.5">
+                          {message.tokens && (
+                            <p>📊 Tokens: {message.tokens}</p>
+                          )}
+                          {message.duration && (
+                            <p>⏱️ Time: {message.duration}s</p>
+                          )}
+                        </div>
                       )}
-                    </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -149,24 +163,60 @@ export function ChatInterface() {
                 const reader = response.body?.getReader();
                 if (!reader) throw new Error('No response body');
 
-                let assistantMessage = '';
-                setMessages((prev) => [...prev, { role: 'assistant', content: assistantMessage }]);
+                let fullContent = '';
+                setMessages((prev) => [...prev, { role: 'assistant', content: fullContent }]);
 
                 const decoder = new TextDecoder();
                 while (true) {
                   const { done, value } = await reader.read();
                   if (done) break;
 
-                  assistantMessage += decoder.decode(value, { stream: true });
+                  fullContent += decoder.decode(value, { stream: true });
                   setMessages((prev) => {
                     const updated = [...prev];
-                    updated[updated.length - 1] = {
-                      role: 'assistant',
-                      content: assistantMessage,
-                    };
+                    const lastMsg = updated[updated.length - 1];
+                    if (lastMsg && lastMsg.role === 'assistant') {
+                      // Extract clean content without metadata
+                      const cleanContent = fullContent
+                        .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
+                        .trim();
+                      updated[updated.length - 1] = {
+                        ...lastMsg,
+                        content: cleanContent,
+                      };
+                    }
                     return updated;
                   });
                 }
+
+                // Extract metadata after stream completes
+                const metadataMatch = fullContent.match(/\[METADATA\](.*?)\[\/METADATA\]/);
+                let tokens = 0;
+                let duration = 0;
+
+                if (metadataMatch) {
+                  try {
+                    const metadata = JSON.parse(metadataMatch[1]);
+                    tokens = metadata.totalTokens;
+                    duration = parseFloat(metadata.duration);
+                  } catch (e) {
+                    console.error('Failed to parse metadata:', e);
+                  }
+                }
+
+                // Update final message with metrics
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const lastMsg = updated[updated.length - 1];
+                  if (lastMsg && lastMsg.role === 'assistant') {
+                    updated[updated.length - 1] = {
+                      ...lastMsg,
+                      tokens,
+                      duration,
+                    };
+                  }
+                  return updated;
+                });
               } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : 'An error occurred';
                 setMessages((prev) => [
