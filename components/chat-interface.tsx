@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Send, Settings, RotateCcw, Copy, Check, Plus, Trash2, MessageSquare, Image as ImageIcon } from 'lucide-react';
+import { Send, Settings, RotateCcw, Copy, Check, Plus, Trash2, MessageSquare, Image as ImageIcon, Download, Zap } from 'lucide-react';
 import { useChatStore, type ConversationMessage, type ContentPart } from '@/lib/store';
+import { exportAsMarkdown, exportAsJSON, downloadFile, generateProjectZip } from '@/lib/export';
 
 export function ChatInterface() {
   const {
@@ -25,6 +26,11 @@ export function ChatInterface() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [selectedImages, setSelectedImages] = useState<string[]>([]);
+  const [showProjectGenerator, setShowProjectGenerator] = useState(false);
+  const [projectType, setProjectType] = useState<'react' | 'node' | 'nextjs'>('react');
+  const [projectName, setProjectName] = useState('my-project');
+  const [projectDesc, setProjectDesc] = useState('A new project');
+  const [generatingProject, setGeneratingProject] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -83,6 +89,45 @@ export function ChatInterface() {
 
   const removeImage = (index: number) => {
     setSelectedImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleExportMarkdown = () => {
+    if (!currentConversation) return;
+    const markdown = exportAsMarkdown(
+      currentConversation.messages,
+      currentConversation.name
+    );
+    downloadFile(markdown, `${currentConversation.name}.md`, 'text/markdown');
+  };
+
+  const handleExportJSON = () => {
+    if (!currentConversation) return;
+    const json = exportAsJSON(
+      currentConversation.messages,
+      currentConversation.name,
+      settings.model
+    );
+    downloadFile(json, `${currentConversation.name}.json`, 'application/json');
+  };
+
+  const handleGenerateProject = async () => {
+    setGeneratingProject(true);
+    try {
+      const blob = await generateProjectZip(projectName, projectType, projectDesc);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${projectName}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setShowProjectGenerator(false);
+    } catch (error) {
+      console.error('Failed to generate project:', error);
+    } finally {
+      setGeneratingProject(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -284,6 +329,35 @@ export function ChatInterface() {
             >
               <MessageSquare size={20} />
             </button>
+            <div className="relative group">
+              <button
+                className="p-2 hover:bg-muted rounded-lg transition-colors"
+                title="Export conversation"
+              >
+                <Download size={20} />
+              </button>
+              <div className="absolute right-0 mt-2 w-48 bg-card border border-border rounded-lg shadow-lg p-2 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50">
+                <button
+                  onClick={handleExportMarkdown}
+                  className="w-full text-left px-3 py-2 hover:bg-muted rounded text-sm"
+                >
+                  📝 Export as Markdown
+                </button>
+                <button
+                  onClick={handleExportJSON}
+                  className="w-full text-left px-3 py-2 hover:bg-muted rounded text-sm"
+                >
+                  📋 Export as JSON
+                </button>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowProjectGenerator(true)}
+              className="p-2 hover:bg-muted rounded-lg transition-colors"
+              title="Generate project"
+            >
+              <Zap size={20} />
+            </button>
             <button
               onClick={() => setShowSettings(!showSettings)}
               className="p-2 hover:bg-muted rounded-lg transition-colors"
@@ -449,6 +523,67 @@ export function ChatInterface() {
           </form>
         </div>
       </div>
+
+      {/* Project Generator Modal */}
+      {showProjectGenerator && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-card border border-border rounded-lg p-6 w-96 max-h-96 overflow-y-auto">
+            <h2 className="text-xl font-bold mb-4">Generate Project</h2>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium">Project Type</label>
+                <select
+                  value={projectType}
+                  onChange={(e) => setProjectType(e.target.value as any)}
+                  className="w-full mt-2 bg-input border border-border rounded px-3 py-2 text-sm"
+                >
+                  <option value="react">⚛️ React (Vite)</option>
+                  <option value="nextjs">🔘 Next.js</option>
+                  <option value="node">🟢 Node.js (Express)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-sm font-medium">Project Name</label>
+                <input
+                  type="text"
+                  value={projectName}
+                  onChange={(e) => setProjectName(e.target.value)}
+                  placeholder="my-project"
+                  className="w-full mt-2 bg-input border border-border rounded px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-medium">Description</label>
+                <textarea
+                  value={projectDesc}
+                  onChange={(e) => setProjectDesc(e.target.value)}
+                  placeholder="Project description..."
+                  className="w-full mt-2 bg-input border border-border rounded px-3 py-2 text-sm resize-none h-20"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-4">
+                <button
+                  onClick={() => setShowProjectGenerator(false)}
+                  className="flex-1 px-4 py-2 border border-border rounded-lg hover:bg-muted transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleGenerateProject}
+                  disabled={generatingProject}
+                  className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+                >
+                  {generatingProject ? '⏳ Generating...' : '📦 Generate & Download'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Settings sidebar */}
       {showSettings && (
