@@ -15,11 +15,19 @@ export interface ChatState {
 }
 
 const DEFAULT_SETTINGS: ChatSettings = {
-  model: 'meta-llama/llama-3.1-8b-instruct',
+  model: 'stealth/ox-alpha',
   temperature: 0.7,
-  topP: 1,
+  topP: 0.95,
   maxTokens: 2048,
-  systemPrompt: 'You are a helpful AI assistant.',
+  systemPrompt: `You are a highly capable and helpful AI assistant. You provide accurate, thoughtful, and well-reasoned responses.
+
+Guidelines:
+- Be clear, concise, and direct in your answers
+- Provide detailed explanations when needed
+- Ask clarifying questions if the user's intent is unclear
+- Admit when you're unsure rather than guessing
+- Format code and structured data clearly
+- Be friendly and professional`,
 };
 
 export const useChatStore = create<ChatState>((set) => ({
