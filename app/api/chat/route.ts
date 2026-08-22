@@ -47,12 +47,37 @@ export async function POST(request: Request) {
     const inputText = messages.map((m: any) => m.content).join(' ');
     const inputTokens = estimateTokens(inputText);
 
-    const stream = await openrouter.chat.completions.create({
-      model,
-      messages: messages.map((msg: any) => ({
+    // Convert messages to OpenAI format, handling images
+    const formattedMessages = messages.map((msg: any) => {
+      if (msg.parts && msg.parts.length > 0) {
+        // Message with images
+        const content: any[] = [];
+        msg.parts.forEach((part: any) => {
+          if (part.type === 'text' && part.text) {
+            content.push({ type: 'text', text: part.text });
+          } else if (part.type === 'image' && part.image) {
+            content.push({
+              type: 'image_url',
+              image_url: {
+                url: part.image, // base64 data URL
+              },
+            });
+          }
+        });
+        return {
+          role: msg.role,
+          content,
+        };
+      }
+      return {
         role: msg.role,
         content: msg.content,
-      })),
+      };
+    });
+
+    const stream = await openrouter.chat.completions.create({
+      model,
+      messages: formattedMessages as any,
       temperature: temperature ?? 0.7,
       top_p: topP ?? 1,
       max_tokens: maxTokens ?? 2048,

@@ -1,24 +1,44 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Send, Settings, RotateCcw, Copy, Check } from 'lucide-react';
-import { useChatStore } from '@/lib/store';
-
-interface Message {
-  role: 'user' | 'assistant';
-  content: string;
-  tokens?: number;
-  duration?: number;
-}
+import { Send, Settings, RotateCcw, Copy, Check, Plus, Trash2, MessageSquare, Image as ImageIcon } from 'lucide-react';
+import { useChatStore, type ConversationMessage, type ContentPart } from '@/lib/store';
 
 export function ChatInterface() {
-  const { settings, updateSettings, resetSettings } = useChatStore();
+  const {
+    settings,
+    updateSettings,
+    resetSettings,
+    conversations,
+    currentConversationId,
+    createConversation,
+    loadConversation,
+    deleteConversation,
+    renameConversation,
+    addMessage,
+    getCurrentConversation,
+  } = useChatStore();
+
   const [showSettings, setShowSettings] = useState(false);
+  const [showHistory, setShowHistory] = useState(true);
   const [copiedId, setCopiedId] = useState<number | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [selectedImages, setSelectedImages] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const currentConversation = getCurrentConversation();
+  const messages = currentConversation?.messages || [];
+
+  // Initialize first conversation if none exists
+  useEffect(() => {
+    if (conversations.length === 0) {
+      createConversation();
+    } else if (!currentConversationId) {
+      loadConversation(conversations[0].id);
+    }
+  }, [conversations, currentConversationId, createConversation, loadConversation]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -31,8 +51,196 @@ export function ChatInterface() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const base64 = event.target?.result as string;
+        setSelectedImages((prev) => [...prev, base64]);
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const removeImage = (index: number) => {
+    setSelectedImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if ((!input.trim() && selectedImages.length === 0) || isLoading) return;
+
+    const userMessage = input;
+    const images = [...selectedImages];
+
+    // Create message parts
+    const parts: ContentPart[] = [];
+    if (userMessage) {
+      parts.push({ type: 'text', text: userMessage });
+    }
+    images.forEach((img) => {
+      parts.push({
+        type: 'image',
+        image: img,
+        mediaType: 'image/jpeg',
+      });
+    });
+
+    // Add user message
+    addMessage({
+      role: 'user',
+      content: userMessage || '[Image]',
+      parts: parts.length > 0 ? parts : undefined,
+    });
+
+    setInput('');
+    setSelectedImages([]);
+    setIsLoading(true);
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            ...messages,
+            {
+              role: 'user',
+              content: userMessage,
+              parts: parts.length > 0 ? parts : undefined,
+            },
+          ],
+          model: settings.model,
+          temperature: settings.temperature,
+          topP: settings.topP,
+          maxTokens: settings.maxTokens,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to get response');
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      let fullContent = '';
+      addMessage({
+        role: 'assistant',
+        content: fullContent,
+      });
+
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        fullContent += decoder.decode(value, { stream: true });
+
+        // Update streaming message
+        const conv = getCurrentConversation();
+        if (conv && conv.messages.length > 0) {
+          const lastMsg = conv.messages[conv.messages.length - 1];
+          if (lastMsg.role === 'assistant') {
+            const cleanContent = fullContent
+              .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
+              .trim();
+            lastMsg.content = cleanContent;
+          }
+        }
+      }
+
+      // Extract metadata
+      const metadataMatch = fullContent.match(/\[METADATA\](.*?)\[\/METADATA\]/);
+      let tokens = 0;
+      let duration = 0;
+
+      if (metadataMatch) {
+        try {
+          const metadata = JSON.parse(metadataMatch[1]);
+          tokens = metadata.totalTokens;
+          duration = parseFloat(metadata.duration);
+        } catch (e) {
+          console.error('Failed to parse metadata:', e);
+        }
+      }
+
+      // Update with metrics
+      const conv = getCurrentConversation();
+      if (conv && conv.messages.length > 0) {
+        const lastMsg = conv.messages[conv.messages.length - 1];
+        if (lastMsg.role === 'assistant') {
+          lastMsg.tokens = tokens;
+          lastMsg.duration = duration;
+          lastMsg.content = fullContent
+            .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
+            .trim();
+        }
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'An error occurred';
+      addMessage({
+        role: 'assistant',
+        content: `Error: ${errorMessage}`,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div className="flex h-screen bg-background">
+      {/* Sidebar - Conversation History */}
+      {showHistory && (
+        <div className="w-64 border-r border-border bg-card flex flex-col">
+          <div className="p-4 border-b border-border">
+            <button
+              onClick={() => {
+                createConversation();
+                setShowHistory(true);
+              }}
+              className="w-full bg-primary text-primary-foreground px-3 py-2 rounded-lg hover:opacity-90 transition-opacity flex items-center justify-center gap-2 text-sm"
+            >
+              <Plus size={16} /> New Chat
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-2">
+            {conversations.map((conv) => (
+              <div
+                key={conv.id}
+                className={`p-3 rounded-lg cursor-pointer transition-colors group ${
+                  currentConversationId === conv.id
+                    ? 'bg-primary text-primary-foreground'
+                    : 'hover:bg-muted'
+                }`}
+                onClick={() => loadConversation(conv.id)}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{conv.name}</p>
+                    <p className="text-xs opacity-70">
+                      {new Date(conv.updatedAt).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteConversation(conv.id);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Chat area */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
@@ -43,13 +251,22 @@ export function ChatInterface() {
               Model: <code className="bg-muted px-2 py-1 rounded">{settings.model}</code>
             </p>
           </div>
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="p-2 hover:bg-muted rounded-lg transition-colors"
-            title="Toggle settings"
-          >
-            <Settings size={20} />
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowHistory(!showHistory)}
+              className="p-2 hover:bg-muted rounded-lg transition-colors"
+              title="Toggle conversation history"
+            >
+              <MessageSquare size={20} />
+            </button>
+            <button
+              onClick={() => setShowSettings(!showSettings)}
+              className="p-2 hover:bg-muted rounded-lg transition-colors"
+              title="Toggle settings"
+            >
+              <Settings size={20} />
+            </button>
+          </div>
         </div>
 
         {/* Messages */}
@@ -75,6 +292,23 @@ export function ChatInterface() {
                   }`}
                 >
                   <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+
+                  {/* Images */}
+                  {message.parts?.some((p) => p.type === 'image') && (
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      {message.parts
+                        .filter((p) => p.type === 'image')
+                        .map((img, idx) => (
+                          <img
+                            key={idx}
+                            src={img.image}
+                            alt="Message attachment"
+                            className="max-w-xs rounded-lg"
+                          />
+                        ))}
+                    </div>
+                  )}
+
                   {message.role === 'assistant' && (
                     <div className="mt-2 space-y-2">
                       <button
@@ -127,123 +361,62 @@ export function ChatInterface() {
           <div ref={messagesEndRef} />
         </div>
 
+        {/* Image Preview */}
+        {selectedImages.length > 0 && (
+          <div className="border-t border-border bg-card px-6 py-3">
+            <div className="flex gap-2 overflow-x-auto pb-2">
+              {selectedImages.map((img, idx) => (
+                <div key={idx} className="relative flex-shrink-0">
+                  <img src={img} alt="Preview" className="h-16 rounded-lg" />
+                  <button
+                    onClick={() => removeImage(idx)}
+                    className="absolute -top-2 -right-2 bg-destructive text-destructive-foreground rounded-full p-1 hover:opacity-80"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Input */}
         <div className="border-t border-border bg-card px-6 py-4">
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              if (!input.trim() || isLoading) return;
-
-              const userMessage = input;
-              setInput('');
-              setMessages((prev) => [...prev, { role: 'user', content: userMessage }]);
-              setIsLoading(true);
-
-              try {
-                const response = await fetch('/api/chat', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    messages: [
-                      ...messages,
-                      { role: 'user', content: userMessage },
-                    ],
-                    model: settings.model,
-                    temperature: settings.temperature,
-                    topP: settings.topP,
-                    maxTokens: settings.maxTokens,
-                  }),
-                });
-
-                if (!response.ok) {
-                  const error = await response.json();
-                  throw new Error(error.error || 'Failed to get response');
-                }
-
-                const reader = response.body?.getReader();
-                if (!reader) throw new Error('No response body');
-
-                let fullContent = '';
-                setMessages((prev) => [...prev, { role: 'assistant', content: fullContent }]);
-
-                const decoder = new TextDecoder();
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-
-                  fullContent += decoder.decode(value, { stream: true });
-                  setMessages((prev) => {
-                    const updated = [...prev];
-                    const lastMsg = updated[updated.length - 1];
-                    if (lastMsg && lastMsg.role === 'assistant') {
-                      // Extract clean content without metadata
-                      const cleanContent = fullContent
-                        .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
-                        .trim();
-                      updated[updated.length - 1] = {
-                        ...lastMsg,
-                        content: cleanContent,
-                      };
-                    }
-                    return updated;
-                  });
-                }
-
-                // Extract metadata after stream completes
-                const metadataMatch = fullContent.match(/\[METADATA\](.*?)\[\/METADATA\]/);
-                let tokens = 0;
-                let duration = 0;
-
-                if (metadataMatch) {
-                  try {
-                    const metadata = JSON.parse(metadataMatch[1]);
-                    tokens = metadata.totalTokens;
-                    duration = parseFloat(metadata.duration);
-                  } catch (e) {
-                    console.error('Failed to parse metadata:', e);
-                  }
-                }
-
-                // Update final message with metrics
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const lastMsg = updated[updated.length - 1];
-                  if (lastMsg && lastMsg.role === 'assistant') {
-                    updated[updated.length - 1] = {
-                      ...lastMsg,
-                      tokens,
-                      duration,
-                    };
-                  }
-                  return updated;
-                });
-              } catch (error) {
-                const errorMessage = error instanceof Error ? error.message : 'An error occurred';
-                setMessages((prev) => [
-                  ...prev,
-                  { role: 'assistant', content: `Error: ${errorMessage}` },
-                ]);
-              } finally {
-                setIsLoading(false);
-              }
-            }}
-            className="flex gap-3"
-          >
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Type your message..."
-              disabled={isLoading}
-              className="flex-1 bg-input border border-border rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
-            />
-            <button
-              type="submit"
-              disabled={isLoading || !input.trim()}
-              className="bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-2"
-            >
-              <Send size={18} />
-            </button>
+          <form onSubmit={handleSubmit} className="space-y-3">
+            <div className="flex gap-3">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Type your message..."
+                disabled={isLoading}
+                className="flex-1 bg-input border border-border rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isLoading}
+                className="bg-secondary text-secondary-foreground px-3 py-2 rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-2"
+                title="Upload images"
+              >
+                <ImageIcon size={18} />
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*"
+                onChange={handleImageUpload}
+                className="hidden"
+              />
+              <button
+                type="submit"
+                disabled={isLoading || (!input.trim() && selectedImages.length === 0)}
+                className="bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-2"
+              >
+                <Send size={18} />
+              </button>
+            </div>
           </form>
         </div>
       </div>
@@ -262,30 +435,17 @@ export function ChatInterface() {
             </button>
           </div>
 
-          {/* Model Selection */}
           <div className="space-y-2">
             <label className="text-sm font-medium">Model ID</label>
             <input
               type="text"
               value={settings.model}
               onChange={(e) => updateSettings({ model: e.target.value })}
-              placeholder="e.g., meta-llama/llama-3.1-8b-instruct"
+              placeholder="e.g., stealth/ox-alpha"
               className="w-full bg-input border border-border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
             />
-            <p className="text-xs text-muted-foreground">
-              Use any OpenRouter model ID. Find models at{' '}
-              <a
-                href="https://openrouter.ai/models"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-primary underline"
-              >
-                openrouter.ai/models
-              </a>
-            </p>
           </div>
 
-          {/* Temperature */}
           <div className="space-y-2">
             <div className="flex justify-between items-center">
               <label className="text-sm font-medium">Temperature</label>
@@ -300,12 +460,8 @@ export function ChatInterface() {
               onChange={(e) => updateSettings({ temperature: parseFloat(e.target.value) })}
               className="w-full"
             />
-            <p className="text-xs text-muted-foreground">
-              Higher = more creative, Lower = more focused
-            </p>
           </div>
 
-          {/* Top P */}
           <div className="space-y-2">
             <div className="flex justify-between items-center">
               <label className="text-sm font-medium">Top P</label>
@@ -320,12 +476,8 @@ export function ChatInterface() {
               onChange={(e) => updateSettings({ topP: parseFloat(e.target.value) })}
               className="w-full"
             />
-            <p className="text-xs text-muted-foreground">
-              Nucleus sampling: controls diversity
-            </p>
           </div>
 
-          {/* Max Tokens */}
           <div className="space-y-2">
             <div className="flex justify-between items-center">
               <label className="text-sm font-medium">Max Tokens</label>
@@ -340,31 +492,16 @@ export function ChatInterface() {
               onChange={(e) => updateSettings({ maxTokens: parseInt(e.target.value) })}
               className="w-full"
             />
-            <p className="text-xs text-muted-foreground">
-              Max response length
-            </p>
           </div>
 
-          {/* System Prompt */}
           <div className="space-y-2">
             <label className="text-sm font-medium">System Prompt</label>
             <textarea
               value={settings.systemPrompt}
               onChange={(e) => updateSettings({ systemPrompt: e.target.value })}
-              placeholder="You are a helpful AI assistant..."
+              placeholder="Instructions for the model..."
               className="w-full bg-input border border-border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary resize-none h-24"
             />
-            <p className="text-xs text-muted-foreground">
-              Instructions for how the model should behave
-            </p>
-          </div>
-
-          {/* Info */}
-          <div className="bg-muted rounded p-3 space-y-2 text-xs">
-            <p className="font-semibold">About OpenChat</p>
-            <p className="text-muted-foreground">
-              This chat app uses OpenRouter to access 100+ AI models. Configure your model ID, parameters, and system prompt to customize the behavior.
-            </p>
           </div>
         </div>
       )}
