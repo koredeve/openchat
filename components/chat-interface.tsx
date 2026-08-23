@@ -138,6 +138,14 @@ export function ChatInterface() {
     const userMessage = input;
     const images = [...selectedImages];
 
+    // Auto-generate title if this is the first message (BEFORE adding it)
+    const isFirstMessage = currentConversation && currentConversation.messages.length === 0;
+    if (isFirstMessage && currentConversation) {
+      const title =
+        userMessage.slice(0, 50).trim() || 'Image conversation';
+      renameConversation(currentConversation.id, title);
+    }
+
     // Create message parts
     const parts: ContentPart[] = [];
     if (userMessage) {
@@ -157,13 +165,6 @@ export function ChatInterface() {
       content: userMessage || '[Image]',
       parts: parts.length > 0 ? parts : undefined,
     });
-
-    // Auto-generate title if this is the first message
-    if (currentConversation && currentConversation.messages.length === 0) {
-      const title =
-        userMessage.slice(0, 50).trim() || 'Image conversation';
-      renameConversation(currentConversation.id, title);
-    }
 
     setInput('');
     setSelectedImages([]);
