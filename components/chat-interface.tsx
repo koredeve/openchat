@@ -170,118 +170,191 @@ export function ChatInterface() {
     setSelectedImages([]);
     setIsLoading(true);
 
-    try {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [
-            ...messages,
-            {
-              role: 'user',
-              content: userMessage,
-              parts: parts.length > 0 ? parts : undefined,
-            },
-          ],
-          model: settings.model,
-          temperature: settings.temperature,
-          topP: settings.topP,
-          maxTokens: settings.maxTokens,
-        }),
-      });
+    // Retry configuration
+    const MAX_RETRIES = 3;
+    const BASE_DELAY = 1000; // 1 second
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to get response');
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response body');
-
-      let fullContent = '';
-      addMessage({
-        role: 'assistant',
-        content: '⏳ Streaming...',
-      });
-
-      const decoder = new TextDecoder();
-      const timeout = 120000; // 2 minute timeout
-      const startTime = Date.now();
-      let lastUpdateTime = Date.now();
-
+    const attemptRequest = async (attempt: number): Promise<Response> => {
       try {
-        while (true) {
-          // Check for timeout
-          if (Date.now() - startTime > timeout) {
-            throw new Error('Stream timeout - response took too long');
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [
+              ...messages,
+              {
+                role: 'user',
+                content: userMessage,
+                parts: parts.length > 0 ? parts : undefined,
+              },
+            ],
+            model: settings.model,
+            temperature: settings.temperature,
+            topP: settings.topP,
+            maxTokens: settings.maxTokens,
+          }),
+        });
+
+        if (!response.ok) {
+          const statusText = response.statusText;
+          let errorMsg = `Server Error (${response.status})`;
+
+          if (response.status === 400) {
+            errorMsg = `❌ Provider Error (400) - Model "${settings.model}" rejected request. Check if model ID is correct or provider is overloaded.`;
+          } else if (response.status === 429) {
+            errorMsg = `⚠️ Rate Limited (429) - Too many requests. Provider throttling. Try again in a moment.`;
+          } else if (response.status === 500) {
+            errorMsg = `🔴 Provider Down (500) - OpenRouter/Model server error. Service might be overloaded.`;
+          } else if (response.status === 503) {
+            errorMsg = `🔴 Service Unavailable (503) - Provider is temporarily down or overloaded.`;
           }
 
-          const { done, value } = await reader.read();
-          if (done) break;
+          try {
+            const error = await response.json();
+            errorMsg = error.error || errorMsg;
+          } catch {
+            // Couldn't parse JSON error, use default
+          }
 
-          lastUpdateTime = Date.now();
-          fullContent += decoder.decode(value, { stream: true });
+          throw new Error(errorMsg);
+        }
 
-          // Update streaming message
+        return response;
+      } catch (error) {
+        if (error instanceof Error) {
+          throw error;
+        }
+        throw new Error('Network error - Failed to connect to server');
+      }
+    };
+
+    // Main request with retry logic
+    let lastError: Error | null = null;
+
+    try {
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await attemptRequest(attempt);
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('No response body');
+
+        let fullContent = '';
+        addMessage({
+          role: 'assistant',
+          content: attempt > 1 ? `⏳ Streaming... (Attempt ${attempt}/${MAX_RETRIES})` : '⏳ Streaming...',
+        });
+
+        const decoder = new TextDecoder();
+        const timeout = 120000; // 2 minute timeout
+        const startTime = Date.now();
+
+        try {
+          while (true) {
+            // Check for timeout
+            if (Date.now() - startTime > timeout) {
+              throw new Error('Stream timeout - response took too long');
+            }
+
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            fullContent += decoder.decode(value, { stream: true });
+
+            // Update streaming message
+            const conv = getCurrentConversation();
+            if (conv && conv.messages.length > 0) {
+              const lastMsg = conv.messages[conv.messages.length - 1];
+              if (lastMsg.role === 'assistant') {
+                const cleanContent = fullContent
+                  .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
+                  .trim();
+                lastMsg.content = cleanContent || '⏳ Streaming...';
+              }
+            }
+          }
+        } catch (streamError) {
+          console.error('Stream error:', streamError);
+          if (fullContent.length === 0) {
+            throw new Error(
+              `Connection lost: ${streamError instanceof Error ? streamError.message : 'No data received'}`
+            );
+          }
+          // If we got partial content, continue with it
+        }
+
+        // Ensure we got content
+        if (fullContent.trim().length === 0) {
+          throw new Error('📭 Model returned empty response - no content generated');
+        }
+
+        // Extract metadata
+        const metadataMatch = fullContent.match(/\[METADATA\](.*?)\[\/METADATA\]/);
+        let tokens = 0;
+        let duration = 0;
+
+        if (metadataMatch) {
+          try {
+            const metadata = JSON.parse(metadataMatch[1]);
+            tokens = metadata.totalTokens;
+            duration = parseFloat(metadata.duration);
+          } catch (e) {
+            console.error('Failed to parse metadata:', e);
+          }
+        }
+
+        // Update with metrics
+        const conv = getCurrentConversation();
+        if (conv && conv.messages.length > 0) {
+          const lastMsg = conv.messages[conv.messages.length - 1];
+          if (lastMsg.role === 'assistant') {
+            lastMsg.tokens = tokens;
+            lastMsg.duration = duration;
+            const cleanContent = fullContent
+              .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
+              .trim();
+            lastMsg.content = cleanContent || 'Response received but appears empty.';
+          }
+        }
+
+        // Success - break out of retry loop
+        break;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        console.error(`Attempt ${attempt}/${MAX_RETRIES} failed:`, lastError.message);
+
+        if (attempt < MAX_RETRIES) {
+          // Calculate exponential backoff delay
+          const delay = BASE_DELAY * Math.pow(2, attempt - 1);
+          addMessage({
+            role: 'assistant',
+            content: `⚠️ Attempt ${attempt} failed: ${lastError.message}\n\n⏳ Retrying in ${(delay / 1000).toFixed(1)}s... (Attempt ${attempt + 1}/${MAX_RETRIES})`,
+          });
+
+          // Wait before retrying
+          await new Promise((resolve) => setTimeout(resolve, delay));
+
+          // Remove retry message for clean experience
           const conv = getCurrentConversation();
           if (conv && conv.messages.length > 0) {
             const lastMsg = conv.messages[conv.messages.length - 1];
             if (lastMsg.role === 'assistant') {
-              const cleanContent = fullContent
-                .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
-                .trim();
-              lastMsg.content = cleanContent || '⏳ Streaming...';
+              conv.messages.pop();
             }
           }
-        }
-      } catch (streamError) {
-        console.error('Stream error:', streamError);
-        if (fullContent.length === 0) {
-          throw new Error(
-            `Connection lost: ${streamError instanceof Error ? streamError.message : 'No data received'}`
-          );
-        }
-        // If we got partial content, continue with it
-      }
-
-      // Ensure we got content
-      if (fullContent.trim().length === 0) {
-        throw new Error('No response received from model - stream was empty');
-      }
-
-      // Extract metadata
-      const metadataMatch = fullContent.match(/\[METADATA\](.*?)\[\/METADATA\]/);
-      let tokens = 0;
-      let duration = 0;
-
-      if (metadataMatch) {
-        try {
-          const metadata = JSON.parse(metadataMatch[1]);
-          tokens = metadata.totalTokens;
-          duration = parseFloat(metadata.duration);
-        } catch (e) {
-          console.error('Failed to parse metadata:', e);
+        } else {
+          // All retries failed
+          addMessage({
+            role: 'assistant',
+            content: `❌ Failed after ${MAX_RETRIES} attempts:\n\n${lastError.message}\n\n**Diagnostics:**\n- Model: ${settings.model}\n- Check if model ID is correct\n- OxAlpha might be overloaded or out of free credits\n- Try a different model like: meta-llama/llama-3.1-8b-instruct`,
+          });
         }
       }
-
-      // Update with metrics
-      const conv = getCurrentConversation();
-      if (conv && conv.messages.length > 0) {
-        const lastMsg = conv.messages[conv.messages.length - 1];
-        if (lastMsg.role === 'assistant') {
-          lastMsg.tokens = tokens;
-          lastMsg.duration = duration;
-          const cleanContent = fullContent
-            .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
-            .trim();
-          lastMsg.content = cleanContent || 'Response received but appears empty. Please try again.';
-        }
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'An error occurred';
       addMessage({
         role: 'assistant',
-        content: `Error: ${errorMessage}`,
+        content: `💥 Unexpected Error: ${errorMessage}`,
       });
     } finally {
       setIsLoading(false);
