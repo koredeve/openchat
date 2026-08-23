@@ -31,6 +31,7 @@ export function ChatInterface() {
   const [projectName, setProjectName] = useState('my-project');
   const [projectDesc, setProjectDesc] = useState('A new project');
   const [generatingProject, setGeneratingProject] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -199,27 +200,52 @@ export function ChatInterface() {
       let fullContent = '';
       addMessage({
         role: 'assistant',
-        content: fullContent,
+        content: '⏳ Streaming...',
       });
 
       const decoder = new TextDecoder();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const timeout = 120000; // 2 minute timeout
+      const startTime = Date.now();
+      let lastUpdateTime = Date.now();
 
-        fullContent += decoder.decode(value, { stream: true });
+      try {
+        while (true) {
+          // Check for timeout
+          if (Date.now() - startTime > timeout) {
+            throw new Error('Stream timeout - response took too long');
+          }
 
-        // Update streaming message
-        const conv = getCurrentConversation();
-        if (conv && conv.messages.length > 0) {
-          const lastMsg = conv.messages[conv.messages.length - 1];
-          if (lastMsg.role === 'assistant') {
-            const cleanContent = fullContent
-              .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
-              .trim();
-            lastMsg.content = cleanContent;
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          lastUpdateTime = Date.now();
+          fullContent += decoder.decode(value, { stream: true });
+
+          // Update streaming message
+          const conv = getCurrentConversation();
+          if (conv && conv.messages.length > 0) {
+            const lastMsg = conv.messages[conv.messages.length - 1];
+            if (lastMsg.role === 'assistant') {
+              const cleanContent = fullContent
+                .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
+                .trim();
+              lastMsg.content = cleanContent || '⏳ Streaming...';
+            }
           }
         }
+      } catch (streamError) {
+        console.error('Stream error:', streamError);
+        if (fullContent.length === 0) {
+          throw new Error(
+            `Connection lost: ${streamError instanceof Error ? streamError.message : 'No data received'}`
+          );
+        }
+        // If we got partial content, continue with it
+      }
+
+      // Ensure we got content
+      if (fullContent.trim().length === 0) {
+        throw new Error('No response received from model - stream was empty');
       }
 
       // Extract metadata
@@ -244,9 +270,10 @@ export function ChatInterface() {
         if (lastMsg.role === 'assistant') {
           lastMsg.tokens = tokens;
           lastMsg.duration = duration;
-          lastMsg.content = fullContent
+          const cleanContent = fullContent
             .replace(/\[METADATA\].*?\[\/METADATA\]/s, '')
             .trim();
+          lastMsg.content = cleanContent || 'Response received but appears empty. Please try again.';
         }
       }
     } catch (error) {
@@ -329,27 +356,36 @@ export function ChatInterface() {
             >
               <MessageSquare size={20} />
             </button>
-            <div className="relative group">
+            <div className="relative">
               <button
+                onClick={() => setShowExportMenu(!showExportMenu)}
                 className="p-2 hover:bg-muted rounded-lg transition-colors"
                 title="Export conversation"
               >
                 <Download size={20} />
               </button>
-              <div className="absolute right-0 mt-2 w-48 bg-card border border-border rounded-lg shadow-lg p-2 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50">
-                <button
-                  onClick={handleExportMarkdown}
-                  className="w-full text-left px-3 py-2 hover:bg-muted rounded text-sm"
-                >
-                  📝 Export as Markdown
-                </button>
-                <button
-                  onClick={handleExportJSON}
-                  className="w-full text-left px-3 py-2 hover:bg-muted rounded text-sm"
-                >
-                  📋 Export as JSON
-                </button>
-              </div>
+              {showExportMenu && (
+                <div className="absolute right-0 mt-2 w-48 bg-card border border-border rounded-lg shadow-lg p-2 z-50">
+                  <button
+                    onClick={() => {
+                      handleExportMarkdown();
+                      setShowExportMenu(false);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-muted rounded text-sm"
+                  >
+                    📝 Export as Markdown
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleExportJSON();
+                      setShowExportMenu(false);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-muted rounded text-sm"
+                  >
+                    📋 Export as JSON
+                  </button>
+                </div>
+              )}
             </div>
             <button
               onClick={() => setShowProjectGenerator(true)}
